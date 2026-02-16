@@ -2876,7 +2876,7 @@ sub build_tool_cmd {
     $tool{'command'} =~ s/\s$//;
     $tool{'command'} .= ") && ";
     $tool{'command'} .= $tools_configs{$tool_name}{'collector'}{$start_stop} . ' "${ARGS[@]}"';
-    
+
     return \%tool;
 }
 
@@ -3494,7 +3494,7 @@ sub organize_run_data() {
                     ($mv_cmd, my $mv_output, my $mv_cmd_rc) = run_cmd($mv_cmd);
                 } else {
                     if ($cs_type ne "profiler") {
-                        log_print sprintf "WARNING: did not find expected sub-directories in %s\n", $pushd_dir . "/" . "tool-data";
+                        log_print sprintf "WARNING: did not find expected sub-directories in %s for %s-%s\n", $pushd_dir . "/" . "tool-data", $cs_type, $cs_id;
                     }
                 }
             }
