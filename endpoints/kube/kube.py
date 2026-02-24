@@ -1483,6 +1483,11 @@ def create_tools_pods(abort_event):
             
         tools.append(tool["name"])
         logger.info("Adding tool '%s' to the list of tools" % (tool["name"]))
+
+    if len(tools) == 0:
+        logger.info("No tools to deploy found")
+        return 0
+
     for tool in tools:
         if not tool in settings["engines"]["profiler-mapping"]:
             settings["engines"]["profiler-mapping"][tool] = {
