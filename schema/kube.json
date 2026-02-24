@@ -136,6 +136,32 @@
             },
             "additionalProperties": false
         },
+        "tool-deployment": {
+            "description": "",
+            "type": "object",
+            "properties": {
+                "tool-opt-in-tags": {
+                    "type": "array",
+                    "minItems": 1,
+                    "uniqueItems": true,
+                    "items": {
+                        "type": "string",
+                        "minLength": 1
+                    }
+                },
+                "tool-opt-out-tags": {
+                    "type": "array",
+                    "minItems": 1,
+                    "uniqueItems": true,
+                    "items": {
+                        "type": "string",
+                        "minLength": 1
+                    }
+                }
+            },
+            "minProperties": 1,
+            "additionalProperties": false
+        },
         "user": {
             "description": "The username used to login to the system that can issue k8s control plane commands",
             "type": "string",

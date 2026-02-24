@@ -50,6 +50,10 @@ endpoint_default_settings = {
     "prefix": {
         "namespace": "crucible-rickshaw",
         "pod": "rickshaw"
+    },
+    "tool-deployment": {
+        "tool-opt-in-tags": [],
+        "tool-opt-out-tags": []
     }
 }
 
@@ -91,6 +95,13 @@ def normalize_endpoint_settings(endpoint, rickshaw):
         for key in endpoint_default_settings["disable-tools"].keys():
             if not key in endpoint["disable-tools"]:
                 endpoint["disable-tools"][key] = endpoint_default_settings["disable-tools"][key]
+
+    if not "tool-deployment" in endpoint:
+        endpoint["tool-deployment"] = copy.deepcopy(endpoint_default_settings["tool-deployment"])
+    else:
+        for key in endpoint_default_settings["tool-deployment"].keys():
+            if not key in endpoint["tool-deployment"]:
+                endpoint["tool-deployment"][key] = copy.deepcopy(endpoint_default_settings["tool-deployment"][key])
 
     if not "namespace" in endpoint:
         # the user didn't request any specific namespace settings so
@@ -1454,6 +1465,22 @@ def create_tools_pods(abort_event):
         logger.error("Failed to load the start tools command file")
         return 1
     for tool in start_tools["tools"]:
+        logger.info("Processing tool %s with deployment mode %s" % (tool["name"], tool["deployment"]))
+        
+        if tool["deployment"] != "auto":
+            if tool["deployment"] == "opt-in":
+                if not tool["opt-tag"] in endpoint["tool-deployment"]["tool-opt-in-tags"]:
+                    logger.info("Tool %s cannot be enabled due to missing opt-in tag" % (tool["name"]))
+                    continue
+                else:
+                    logger.info("Tool %s opt-in tag found for the endpoint so it is enabled" % (tool["name"]))
+            elif tool["deployment"] == "opt-out":
+                if tool["opt-tag"] in endpoint["tool-deployment"]["tool-opt-out-tags"]:
+                    logger.info("Tool %s opt-out tag found for the endpoint so it is disabled" % (tool["name"]))
+                    continue
+                else:
+                    logger.info("Tool %s opt-out tag not found for the endpoint so it is enabled" % (tool["name"]))
+            
         tools.append(tool["name"])
         logger.info("Adding tool '%s' to the list of tools" % (tool["name"]))
     for tool in tools:
