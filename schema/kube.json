@@ -136,6 +136,106 @@
             },
             "additionalProperties": false
         },
+        "tool-deployment": {
+            "description": "need to fill these in",
+            "oneOf": [
+                {
+                    "type": "object",
+                    "properties": {
+                        "scope": {
+                            "type": "string",
+                            "enum": [
+                                "endpoint"
+                            ]
+                        },
+                        "tool-opt-in-tags": {
+                            "type": "array",
+                            "minItems": 1,
+                            "uniqueItems": true,
+                            "items": {
+                                "type": "string",
+                                "minLength": 1
+                            }
+                        },
+                        "tool-opt-out-tags": {
+                            "type": "array",
+                            "minItems": 1,
+                            "uniqueItems": true,
+                            "items": {
+                                "type": "string",
+                                "minLength": 1
+                            }
+                        }
+                    },
+                    "minProperties": 2,
+                    "additionalProperties": false,
+                    "required": [
+                        "scope"
+                    ]
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "scope": {
+                            "type": "string",
+                            "enum": [
+                                "engine"
+                            ]
+                        },
+                        "engines": {
+                            "type": "array",
+                            "minItems": 1,
+                            "uniqueItems": true,
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "role": {
+                                        "type": "string",
+                                        "enum": [
+                                            "client",
+                                            "server"
+                                        ]
+                                    },
+                                    "ids": {
+                                        "description": "This parameter defines which engines with the specified role are being targeted.  The 'number-lists' definition below explains what the available formats are.",
+                                        "$ref": "#/definitions/number-lists"
+                                    },
+                                    "tool-opt-in-tags": {
+                                        "type": "array",
+                                        "minItems": 1,
+                                        "uniqueItems": true,
+                                        "items": {
+                                            "type": "string",
+                                            "minLength": 1
+                                        }
+                                    },
+                                    "tool-opt-out-tags": {
+                                        "type": "array",
+                                        "minItems": 1,
+                                        "uniqueItems": true,
+                                        "items": {
+                                            "type": "string",
+                                            "minLength": 1
+                                        }
+                                    }
+                                },
+                                "minProperties": 3,
+                                "additionalProperties": false,
+                                "required": [
+                                    "role",
+                                    "ids"
+                                ]
+                            }
+                        }
+                    },
+                    "additionalProperties": false,
+                    "required": [
+                        "scope",
+                        "engines"
+                    ]
+                }
+            ]
+        },
         "user": {
             "description": "The username used to login to the system that can issue k8s control plane commands",
             "type": "string",

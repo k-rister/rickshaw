@@ -46,7 +46,7 @@ use toolbox::jsonsettings;
 $toolbox::logging::debug = 0;
 
 my $ug = Data::UUID->new;
-my %defaults = ( "num-samples" => 1, "tool-group" => "default", "test-order" => "s",
+my %defaults = ( "num-samples" => 1, "tool-group" => "default", "test-order" => "sample",
                  "base-run-dir" => tempdir(), "id" => $ug->create_str(),
                  "max-sample-failures" => 1, "run-file" => "", "roadblock-password" => "flubber");
 
@@ -131,6 +131,7 @@ my %clients_servers;
 my @rb_cs_ids; # unique IDs for roadblock
 my $abort_test_id;
 my @active_followers;
+my %active_collector_types;
 
 (my $detect_arch_cmd, my $arch, my $detect_arch_cmd_rc) = run_cmd('uname -m');
 chomp($arch);
@@ -1116,7 +1117,7 @@ sub source_container_image {
             }
         } else {
             $req_arg = shift(@requirements);
-            $skip_update = "true";
+            $skip_update = "false";
         }
 
         # keep separate cs_conf_file contents before and after md5
@@ -1824,7 +1825,7 @@ sub validate_controller_env() {
         if ( ! exists $run{'registries'}{'public'}{'push-token'} ) {
             die "You must define a path to a public registry token file (\$run{'registries'}{'public'}{'push-token'}) to use rickshaw with workshop"
         }
-        if (!$run{'registries'}{'public'}{'repo'} =~ /^(\w+:\/){0,1}([^\/]+\/){0,1}([^\/]+\/){0,1}([^\/]+)$/) {
+        if ($run{'registries'}{'public'}{'repo'} !~ /^(\w+:\/){0,1}([^\/]+\/){0,1}([^\/]+\/){0,1}([^\/]+)$/) {
             die "The \$run{'registries'}{'public'}{'repo'} does not match the pattern [protocol:][host[:port]][/<project>]/<repo>: " . $run{'registries'}{'public'}{'repo'};
         }
     }
@@ -1929,7 +1930,6 @@ sub load_tool_params() {
     if (not exists $run{'tool-params'} ) {
         $run{'tool-params'} = $rickshaw_project_dir . "/config/tool-params.json";
     }
-    # TODO: need schema for tool-params
     ($rc, my $json_ref) = get_json_file($run{'tool-params'}, $tool_params_schema_file);
     if ($rc > 0 or ! defined $json_ref) {
         log_print "Could not open the tool params file\n";
@@ -2626,7 +2626,18 @@ sub validate_endpoints() {
         $$endpoint{'userenvs'} = [];
         foreach my $line (@output) {
             chomp $line;
-            if ($line =~ /(client|server|profiler)\s+(.+)$/) {
+            if ($line =~ /^engine-types\s+(.+)$/) {
+                debug_log(sprintf("Processing engine types: %s\n", $1));
+                my @engine_types = split(/ /, $1);
+                foreach my $engine_type (@engine_types) {
+                    if (! exists $active_collector_types{$engine_type}) {
+                        debug_log(sprintf("Adding engine type '%s' as an active collector type\n", $engine_type));
+                        $active_collector_types{$engine_type} = 1;
+                    } else {
+                        debug_log(sprintf("Engine type '%s' has already been added as an active collector type\n", $engine_type));
+                    }
+                }
+            } elsif ($line =~ /(client|server|profiler)\s+(.+)$/) {
                 my $engine = $1;
                 my $ids = $2;
                 # An endpoint with a profiler adds its engines' roadblock followers
@@ -2749,22 +2760,59 @@ sub validate_endpoints() {
 
 sub build_test_order() {
     log_print "Building test execution order\n";
-    # Build test execution order (and the iteration/sample dirs)
+
     if ($run{'test-order'} eq 's') {
+        log_print "WARNING: The short forms of 'test-order' are deprecated.  Please change 's' to 'sample'.\n";
+        $run{'test-order'} = "sample";
+    } elsif ($run{'test-order'} eq 'i') {
+        log_print "WARNING: The short forms of 'test-order' are deprecated.  Please change 'i' to 'iteration'.\n";
+        $run{'test-order'} = "iteration";
+    } elsif ($run{'test-order'} eq 'r') {
+        log_print "WARNING: The short forms of 'test-order' are deprecated.  Please change 'r' to 'random'.\n";
+        $run{'test-order'} = "random";
+    }
+
+    if ($run{'test-order'} eq 'sample') {
+        # in sample mode, the tests are executed by running all
+        # samples of an iteration before moving on to the next
+        # iteration; the iterations are also executed in order from 1
+        # to N
         for (my $iid = 1; $iid <= scalar @{ $run{'iterations'} }; $iid++) {
             for (my $sid = 1; $sid <= $run{'num-samples'}; $sid++) {
                 my %test = ('iteration-id' => $iid, 'sample-id' => $sid);
                 push(@tests, \%test);
             }
         }
-    } elsif ($run{'test-order'} eq 'i') {
+    } elsif ($run{'test-order'} eq 'iteration') {
+        # in iteration mode, the tests are executed by running one
+        # sample from each iteration before running an additional
+        # sample (again from each iteration before moving on to the
+        # next sample); the iterations are also executed in order from
+        # 1 to N
         for (my $sid = 1; $sid <= $run{'num-samples'}; $sid++) {
             for (my $iid = 1; $iid <= scalar @{ $run{'iterations'} }; $iid++) {
                 my %test = ('iteration-id' => $iid, 'sample-id' => $sid);
                 push(@tests, \%test);
             }
         }
-    } elsif ($run{'test-order'} eq 'r') {
+    } elsif ($run{'test-order'} eq 'random') {
+        # in random mode (which could also be described as chaos
+        # mode), there is no set algorithm that determines the order
+        # in which iteration samples are executed; an iteration is
+        # chosen at random as the next sample to run and this logic
+        # repeats itself until all iteration samples have been
+        # exhausted; sample numbers are executed in order for
+        # simplicity -- sample 2 of a given iteration never executes
+        # before sample 1 -- but since the individual samples of an
+        # iteration are interchangeable that is irrelevant; the idea
+        # here is to prevent systemic side affects from one iteration
+        # having undo influence on another (for example, running a
+        # read test after a write test could give different results
+        # than running the read test before the write test due to
+        # caching of the write data) and by randomly choosing which
+        # iteration to run next the pattern of execution will always
+        # be different thus avoiding such pathological test execution
+        # behavior
         my $total_samples = scalar( @{$run{'iterations'} }) * $run{'num-samples'};
         my @available_tests;
         for (my $iid = 1; $iid <= scalar @{ $run{'iterations'} }; $iid++) {
@@ -2801,32 +2849,46 @@ sub build_test_order() {
 sub build_tool_cmd {
     my $tool_entry = shift;
     my $start_stop = shift;
-    my $fh = shift;
     my $endpoint_type = shift;
+
     my $tool_name = $$tool_entry{'tool'};
-    # Assemble the arguments as a bash array in order to not get them scrambled later
-    my $tool_cmd = $tool_name . ':declare -a ARGS=(';
-    foreach my $tool_param (@{ $$tool_entry{'params'} }) {
-        if (exists($$tool_param{'enabled'}) && ($$tool_param{'enabled'} eq "no")) {
-            next;
-        }
-        $tool_cmd .= "'--" . $$tool_param{'arg'} . "' '" . $$tool_param{'val'} . "' ";
-    }
-    $tool_cmd =~ s/\s$//;
-    $tool_cmd .= ") && ";
-    $tool_cmd .= $tools_configs{$tool_name}{'collector'}{$start_stop} . ' "${ARGS[@]}"';
+
     # Check if the engine is deployed by an endpoint that blacklists this tool
     if (exists $tools_configs{$tool_name}{'collector'}{'blacklist'}) {
         for my $i (@{ $tools_configs{$tool_name}{'collector'}{'blacklist'} }) {
             if (defined $endpoint_type and $endpoint_type eq $$i{'endpoint'}) {
-                # If it is, don't let this client/server run this tool
-                undef $tool_cmd;
+                debug_log(sprintf "returning undefined because this tool [%s] is not allowed to run on the specified endpoint [%s]\n", $tool_name, $endpoint_type);
+                return;
             }
         }
     }
-    if (defined $tool_cmd) {
-        printf $fh "%s\n", $tool_cmd;
+
+    # Assemble the arguments as a bash array in order to not get them scrambled later
+    my %tool = ( 'name' => $tool_name,
+                 'command' => 'declare -a ARGS=(',
+                 'deployment' => "auto",
+                 'opt-tag' => undef );
+
+    if (exists($$tool_entry{'deployment'}) && ($$tool_entry{'deployment'} ne "auto")) {
+        $tool{'deployment'} = $$tool_entry{'deployment'};
+
+        if (exists($$tool_entry{'opt-tag'})) {
+            $tool{'opt-tag'} = $$tool_entry{'opt-tag'};
+        }
     }
+
+    foreach my $tool_param (@{ $$tool_entry{'params'} }) {
+        if (exists($$tool_param{'enabled'}) && ($$tool_param{'enabled'} eq "no")) {
+            next;
+        }
+        $tool{'command'} .= "'--" . $$tool_param{'arg'} . "' '" . $$tool_param{'val'} . "' ";
+    }
+
+    $tool{'command'} =~ s/\s$//;
+    $tool{'command'} .= ") && ";
+    $tool{'command'} .= $tools_configs{$tool_name}{'collector'}{$start_stop} . ' "${ARGS[@]}"';
+
+    return \%tool;
 }
 
 sub build_files_list {
@@ -2918,7 +2980,7 @@ sub prepare_bench_tool_engines() {
             # NOTE: for multi-bench, this will require some new logic.  One may have a benchmark
             # which uses a pre-script but does not use ID 1.  Instead we will need to run from the 
             # first ID for that benchmark.
-            log_print "generating pre-script cmd\n";
+            log_print sprintf "generating pre-script cmd for benchmark '%s'\n", $this_benchmark;
             my $cmd = $bench_configs{$this_benchmark}{"controller"}{"pre-script"} . " " . dump_params($run{'iterations'}[0]{'params'}, 1, "client");
             $cmd =~ s/\%bench-dir\%/$bench_dirs{$this_benchmark}/g;
             $cmd =~ s/\%run-dir\%/$run_dir/g;
@@ -2948,7 +3010,11 @@ sub prepare_bench_tool_engines() {
         || die "Could not copy roadblock.py to " . $engine_roadblock_module;
 
     my @collectors = grep(/[^client|^server]/, keys %clients_servers);
-    my @all_collector_types = qw(client server worker master profiler compute);
+    my @all_collector_types;
+    foreach my $collector_type (sort(keys %active_collector_types)) {
+        push @all_collector_types, $collector_type;
+    }
+    log_print sprintf "Active Collector Types: %s\n", join(" ", @all_collector_types);
 
     # Each tool may specify, for specific endpoints, that it needs to run somewhere other than a client
     # or server (a "collector").  This preference is in the "whitelist" section.  Check each tool used
@@ -2973,33 +3039,53 @@ sub prepare_bench_tool_engines() {
             }
         }
     }
-    # Now build all of the tool start and stop cmd files for each collector
+    # Now build all of the tool start and stop cmd files for each collector type
+    log_print "Generating collector type tool commands\n";
     for my $collector (@all_collector_types) {
+        debug_log(sprintf "processing collector type [%s]\n", $collector);
         for my $start_stop ("start", "stop") {
+            debug_log(sprintf "processing start/stop [%s]\n", $start_stop);
             my $collector_tool_cmds_dir = $tool_cmds_dir . "/" . $collector;
             -e $collector_tool_cmds_dir || make_path($collector_tool_cmds_dir) ||
                 die "[ERROR]Create collector directory failed: [" . $collector_tool_cmds_dir . "]\n";
-            my $tool_cmd_file = $collector_tool_cmds_dir . "/" . $start_stop; 
-            my $tool_count = 0;
-            open(my $fh, ">" . $tool_cmd_file) ||
-                die "[ERROR]could not open cmd file for writing: [" . $tool_cmd_file . "]\n";
-            debug_log(sprintf "writing tool-cmds [%s]\n", $tool_cmd_file);
+
+            my $tool_cmd_file = $collector_tool_cmds_dir . "/" . $start_stop . ".json";
+            my %tool_data = ( 'tools' => [] );
+
             foreach my $tool_entry (@tools_params) {
                 my $tool_name = $$tool_entry{'tool'};
+
                 debug_log(sprintf "tool_name: [%s]\n", $tool_name);
+
                 for my $i (@{ $tools_configs{$tool_name}{'collector'}{'whitelist'} }) {
                     debug_log(sprintf "endpoint: [%s]\n", $$i{'endpoint'});
+
                     if (grep(/^$collector$/, @{ $$i{'collector-types'} })) {
-                        debug_log(sprintf "building tool cmd for [%s]\n", $tool_name);
-                        build_tool_cmd($tool_entry, $start_stop, $fh);
-                        $tool_count++;
+                        debug_log(sprintf "building tool [%s]\n", $tool_name);
+
+                        my $tool = build_tool_cmd($tool_entry, $start_stop);
+
+                        if (defined $tool) {
+                            debug_log("appending tool to list\n");
+                            push @{ $tool_data{'tools'} }, $tool;
+
+                            # multiple endpoints might have the same
+                            # collector type so we have to stop once we
+                            # have found one otherwise we could add the
+                            # tool more than once
+                            last;
+                        } else {
+                            debug_log("not appending tool to list because it is undefined\n");
+                        }
                     } else {
                         debug_log(sprintf "collector [%s] was not found in collector-types: [%s]\n", $collector, join(" ", @{ $$i{'collector-types'} }));
                     }
                 }
             }
-            close($fh);
-            chmod 0755, $tool_cmd_file;
+
+            debug_log(sprintf "writing tool-cmds [%s]\n", $tool_cmd_file);
+            put_json_file($tool_cmd_file, \%tool_data) &&
+                die "[ERROR] Failed to create " . $tool_cmd_file . "!\n";
         }
     }
     # By default all tools run on client and servers.  However,
@@ -3008,7 +3094,7 @@ sub prepare_bench_tool_engines() {
     # already collecting that data from a different source (and a client
     # and/or server would be collecting duplicate data).  For this reason tool
     # cmd files are built specifically for each client and server.
-    log_print "Generating tool cmds\n";
+    log_print "Generating per client/server engine tool commands\n";
     foreach my $cs_type (keys %clients_servers) {
         next if ($cs_type eq "profiler"); # Currently we do not generate specific tools cmds for each profiler
         for my $start_stop ("start", "stop") {
@@ -3019,15 +3105,28 @@ sub prepare_bench_tool_engines() {
                 }
                 my $cs_tool_cmds_dir = $tool_cmds_dir . "/" . $cs_type . "/" . $$cs_ref{'id'};
                 make_path($cs_tool_cmds_dir);
-                my $tool_cmd_file = $cs_tool_cmds_dir . "/" . $start_stop;
-                open(my $fh, ">" . $tool_cmd_file) ||
-                    die "[ERROR]could not open cmd file for writing: [" . $tool_cmd_file . "]\n";
-                debug_log(sprintf "writing tool-cmds [%s]\n", $tool_cmd_file);
+
+                my $tool_cmd_file = $cs_tool_cmds_dir . "/" . $start_stop . ".json";
+                my %tool_data = ( 'tools' => [] );
+
                 foreach my $tool_entry (@tools_params) {
-                    build_tool_cmd($tool_entry, $start_stop, $fh, $$cs_ref{'endpoint-type'});
+                    my $tool_name = $$tool_entry{'tool'};
+
+                    debug_log(sprintf "building tool [%s]\n", $tool_name);
+
+                    my $tool = build_tool_cmd($tool_entry, $start_stop, $$cs_ref{'endpoint-type'});
+
+                    if (defined $tool) {
+                        debug_log("appending tool to list\n");
+                        push @{ $tool_data{'tools'} }, $tool;
+                    } else {
+                        debug_log("not appending tool to list because it is undefined\n");
+                    }
                 }
-                close($fh);
-                chmod 0755, $tool_cmd_file;
+
+                debug_log(sprintf "writing tool-cmds [%s]\n", $tool_cmd_file);
+                put_json_file($tool_cmd_file, \%tool_data) &&
+                    die "[ERROR] Failed to create " . $tool_cmd_file . "!\n";
             }
         }
     }
@@ -3405,8 +3504,8 @@ sub organize_run_data() {
                     my $mv_cmd = "/bin/mv * " . $cs_tool_dest_path;
                     ($mv_cmd, my $mv_output, my $mv_cmd_rc) = run_cmd($mv_cmd);
                 } else {
-                    if (! $cs_type eq "profiler") {
-                        log_print sprintf "WARNING: did not find expected sub-directories in %s\n", $pushd_dir . "/" . "tool-data";
+                    if ($cs_type ne "profiler") {
+                        log_print sprintf "WARNING: did not find expected sub-directories in %s for %s-%s\n", $pushd_dir . "/" . "tool-data", $cs_type, $cs_id;
                     }
                 }
             }
