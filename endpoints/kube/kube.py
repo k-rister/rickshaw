@@ -50,6 +50,11 @@ endpoint_default_settings = {
     "prefix": {
         "namespace": "crucible-rickshaw",
         "pod": "rickshaw"
+    },
+    "tool-deployment": {
+        "scope": "endpoint",
+        "tool-opt-in-tags": [],
+        "tool-opt-out-tags": []
     }
 }
 
@@ -91,6 +96,25 @@ def normalize_endpoint_settings(endpoint, rickshaw):
         for key in endpoint_default_settings["disable-tools"].keys():
             if not key in endpoint["disable-tools"]:
                 endpoint["disable-tools"][key] = endpoint_default_settings["disable-tools"][key]
+
+    if not "tool-deployment" in endpoint:
+        endpoint["tool-deployment"] = copy.deepcopy(endpoint_default_settings["tool-deployment"])
+    else:
+        if not "scope" in endpoint["tool-deployment"]:
+            endpoint["tool-deployment"]["scope"] = "endpoint"
+
+        if endpoint["tool-deployment"]["scope"] == "endpoint":
+            if not "tool-opt-in-tags" in endpoint["tool-deployment"]:
+                endpoint["tool-deployment"]["tool-opt-in-tags"] = []
+            if not "tool-opt-out-tags" in endpoint["tool-deployment"]:
+                endpoint["tool-deployment"]["tool-opt-out-tags"] = []
+        elif endpoint["tool-deployment"]["scope"] == "engine":
+            for engine_entry in endpoint["tool-deployment"]["engines"]:
+                engine_entry["ids"] = endpoints.expand_ids(engine_entry["ids"])
+                if not "tool-opt-in-tags" in engine_entry:
+                    engine_entry["tool-opt-in-tags"] = []
+                if not "tool-opt-out-tags" in engine_entry:
+                    engine_entry["tool-opt-out-tags"] = []
 
     if not "namespace" in endpoint:
         # the user didn't request any specific namespace settings so
@@ -681,7 +705,7 @@ def compile_object_configs():
 
     return 0
 
-def create_pod_crd(role = None, id = None, node = None):
+def create_pod_crd(role = None, id = None, node = None, node_tools = None):
     """
     Create a pod CRD
 
@@ -849,6 +873,9 @@ def create_pod_crd(role = None, id = None, node = None):
         container_names.append(name)
     if role == "worker" or role == "master":
         for tool in settings["engines"]["profiler-mapping"].keys():
+            if node_tools is not None and tool not in node_tools:
+                logger.info("Skipping tool '%s' for pod '%s-%d' because it is not in the node's tool list %s" % (tool, role, id, node_tools))
+                continue
             mapping = settings["engines"]["profiler-mapping"][tool]
             engine_name = "%s-%s-%d" % ("profiler", mapping["label"], id)
             mapping["ids"].append(engine_name)
@@ -1383,6 +1410,42 @@ def create_cs_pods(cpu_partitioning = None, abort_event = None):
     
     return 0
 
+def determine_tools_for_node(start_tools, opt_in_tags, opt_out_tags):
+    """
+    Given start_tools and tag sets, return list of enabled tool names.
+
+    Args:
+        start_tools (dict): The loaded start tools data structure containing a "tools" list
+        opt_in_tags (set/list): The opt-in tags that apply to this node
+        opt_out_tags (set/list): The opt-out tags that apply to this node
+
+    Globals:
+        logger: a logger instance
+
+    Returns:
+        tools (list): A list of enabled tool names
+    """
+    tools = []
+    for tool in start_tools["tools"]:
+        if tool["deployment"] == "auto":
+            logger.info("Tool '%s' has deployment mode 'auto', enabling" % (tool["name"]))
+            tools.append(tool["name"])
+        elif tool["deployment"] == "opt-in":
+            if tool["opt-tag"] in opt_in_tags:
+                logger.info("Tool '%s' has deployment mode 'opt-in' and its opt-tag '%s' was found in opt-in tags, enabling" % (tool["name"], tool["opt-tag"]))
+                tools.append(tool["name"])
+            else:
+                logger.info("Tool '%s' has deployment mode 'opt-in' but its opt-tag '%s' was not found in opt-in tags %s, not enabling" % (tool["name"], tool["opt-tag"], opt_in_tags))
+        elif tool["deployment"] == "opt-out":
+            if tool["opt-tag"] not in opt_out_tags:
+                logger.info("Tool '%s' has deployment mode 'opt-out' and its opt-tag '%s' was not found in opt-out tags, enabling" % (tool["name"], tool["opt-tag"]))
+                tools.append(tool["name"])
+            else:
+                logger.info("Tool '%s' has deployment mode 'opt-out' and its opt-tag '%s' was found in opt-out tags %s, not enabling" % (tool["name"], tool["opt-tag"], opt_out_tags))
+        else:
+            logger.warning("Tool '%s' has unknown deployment mode '%s', not enabling" % (tool["name"], tool["deployment"]))
+    return tools
+
 def create_tools_pods(abort_event):
     """
     Create tools pods where appropriate based on the input parameters and the location of launched client/server pods
@@ -1447,15 +1510,84 @@ def create_tools_pods(abort_event):
         return 0
 
     logger.info("Loading tools information and creating profiler mapping")
-    tools = []
 
     start_tools,err = load_json_file(settings["dirs"]["local"]["tool-cmds"] + "/profiler/start.json.xz", uselzma = True)
     if start_tools is None:
         logger.error("Failed to load the start tools command file")
         return 1
-    for tool in start_tools["tools"]:
-        tools.append(tool["name"])
-        logger.info("Adding tool '%s' to the list of tools" % (tool["name"]))
+
+    per_node_tools = None
+
+    if endpoint["tool-deployment"]["scope"] == "endpoint":
+        logger.info("Tool deployment scope is 'endpoint'")
+
+        tools = determine_tools_for_node(start_tools,
+                                         endpoint["tool-deployment"]["tool-opt-in-tags"],
+                                         endpoint["tool-deployment"]["tool-opt-out-tags"])
+
+        for tool in tools:
+            logger.info("Adding tool '%s' to the list of tools" % (tool))
+
+        if len(tools) == 0:
+            logger.info("No tools to deploy found")
+            return 0
+    elif endpoint["tool-deployment"]["scope"] == "engine":
+        logger.info("Tool deployment scope is 'engine'")
+
+        node_tags = dict()
+        for engine_entry in endpoint["tool-deployment"]["engines"]:
+            role = engine_entry["role"]
+            for engine_id in engine_entry["ids"]:
+                pod_key = "%s-%d" % (role, engine_id)
+                if pod_key in settings["engines"]["endpoint"]["pods"]:
+                    node = settings["engines"]["endpoint"]["pods"][pod_key]["node"]
+                    if node not in node_tags:
+                        node_tags[node] = {
+                            "tool-opt-in-tags": set(),
+                            "tool-opt-out-tags": set()
+                        }
+                    for tag in engine_entry["tool-opt-in-tags"]:
+                        node_tags[node]["tool-opt-in-tags"].add(tag)
+                    for tag in engine_entry["tool-opt-out-tags"]:
+                        node_tags[node]["tool-opt-out-tags"].add(tag)
+                    logger.info("Engine '%s' runs on node '%s', adding tags: opt-in=%s opt-out=%s" % (pod_key, node, engine_entry["tool-opt-in-tags"], engine_entry["tool-opt-out-tags"]))
+                else:
+                    logger.info("Engine '%s' is not owned by this endpoint, skipping" % (pod_key))
+
+        per_node_tools = dict()
+        for node in profiled_nodes:
+            logger.info("Determining tools for node '%s'" % (node))
+            if node in node_tags:
+                node_tool_list = determine_tools_for_node(start_tools,
+                                                          node_tags[node]["tool-opt-in-tags"],
+                                                          node_tags[node]["tool-opt-out-tags"])
+            else:
+                logger.info("Node '%s' has no engine-specific tags, using default tool behavior" % (node))
+                node_tool_list = determine_tools_for_node(start_tools, [], [])
+            per_node_tools[node] = node_tool_list
+            logger.info("Node '%s' will have these tools: %s" % (node, node_tool_list))
+
+        nodes_to_remove = []
+        for node in profiled_nodes:
+            if len(per_node_tools[node]) == 0:
+                logger.info("Node '%s' has no tools to deploy, removing from profiled nodes" % (node))
+                nodes_to_remove.append(node)
+        for node in nodes_to_remove:
+            profiled_nodes.remove(node)
+
+        if len(profiled_nodes) == 0:
+            logger.info("No nodes with tools to deploy found")
+            return 0
+
+        tools = set()
+        for node in profiled_nodes:
+            for tool in per_node_tools[node]:
+                tools.add(tool)
+        tools = list(tools)
+    else:
+        logger.error("Unknown tool-deployment scope '%s'" % (endpoint["tool-deployment"]["scope"]))
+        return 1
+
     for tool in tools:
         if not tool in settings["engines"]["profiler-mapping"]:
             settings["engines"]["profiler-mapping"][tool] = {
@@ -1490,13 +1622,18 @@ def create_tools_pods(abort_event):
 
         logger.info("Creating pod '%s-%d' to run on node '%s'" % (pod["role"], pod["id"], pod["node"]))
 
-        pod["crd"], rc = create_pod_crd(pod["role"], pod["id"], node = pod["node"])
+        pod_node_tools = per_node_tools.get(node) if per_node_tools is not None else None
+        logger.info("Pod '%s-%d' on node '%s' has node_tools=%s" % (pod["role"], pod["id"], pod["node"], pod_node_tools))
+        pod["crd"], rc = create_pod_crd(pod["role"], pod["id"], node = pod["node"], node_tools = pod_node_tools)
         if rc == 1:
             logger.error("Failed to create CRD for '%s-%d'" % (pod["role"], pod["id"]))
             if pod["crd"] is None:
                 logger.error("No CRD available for '%s-%d'" % (pod["role"], pod["id"]))
             else:
                 logger.error("CRD generated for '%s-%d':\n%s" % (pod["role"], pod["id"], endpoints.dump_json(pod["crd"])))
+        elif len(pod["crd"]["spec"]["containers"]) == 0:
+            logger.warning("Skipping pod '%s-%d' on node '%s' because it has no tool containers" % (pod["role"], pod["id"], pod["node"]))
+            continue
         else:
             crd_json_str = endpoints.dump_json(pod["crd"])
 
@@ -1506,7 +1643,7 @@ def create_tools_pods(abort_event):
             with open(crd_filename, "w", encoding = "ascii") as crd_fp:
                 crd_fp.write(crd_json_str)
             logger.info("Wrote CRD for %s-%s to %s" % (pod["role"], pod["id"], crd_filename))
-        
+
         settings["engines"]["endpoint"]["classes"]["profiled-nodes"].append(pod)
 
     with endpoints.remote_connection(settings["run-file"]["endpoints"][args.endpoint_index]["host"],
